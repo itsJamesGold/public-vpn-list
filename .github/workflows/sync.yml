@@ -1,0 +1,34 @@
+name: PublicVPNList Cloud Sync
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # يعمل تلقائياً كل 6 ساعات
+  workflow_dispatch: # يسمح لك بتشغيله يدوياً بضغطة زر من هاتفك
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Downloader
+        run: |
+          # نشغل البرنامج ونخبره ألا يقوم بالرفع من داخل البايثون (سنتولى ذلك هنا)
+          python downloader.py --yes --max-pages 100
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web_dist --project-name=public-vpn-list
