@@ -219,3 +219,19 @@ export async function hmacSha512(secret, message) {
   const signature = await crypto.subtle.sign('HMAC', key, enc.encode(message));
   return Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+
+/**
+ * Computes HMAC-SHA256 hex signature using WebCrypto API
+ */
+export async function hmacSha256(secret, message) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
