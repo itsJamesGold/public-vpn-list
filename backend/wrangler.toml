@@ -1,10 +1,27 @@
-name = "vpn-backend"
-main = "index.js"
+name = "zvpn-backend"
+main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-[vars]
-API_SECRET = "PublicVPN_Super_Secret_2026_Key"
+account_id = "42326c36b367947b8ff21f4f1bad14af"
+workers_dev = true
+
+# ── Custom Domain Routes ───────────────────────────────────────────────────────
+routes = [
+  { pattern = "z-vpn.site/*", zone_name = "z-vpn.site" },
+  { pattern = "www.z-vpn.site/*", zone_name = "z-vpn.site" }
+]
+
+[[r2_buckets]]
+binding = "SERVERS_BUCKET"
+bucket_name = "publicvpnlist-profiles"
 
 [[kv_namespaces]]
-binding = "VPN_DATA"
-id = "73219165768a41b6bb2f920ecb41ec06"
+binding = "CORRECTIONS_KV"
+id = "2fa068f640bb4c369bde5d9923ab8def"
+
+[vars]
+ENVIRONMENT = "production"
+
+# ── Observability (free) ──────────────────────────────────────────────────────
+[observability]
+enabled = true

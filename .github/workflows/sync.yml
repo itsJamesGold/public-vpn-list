@@ -1,34 +1,69 @@
-name: PublicVPNList Cloud Sync
+name: VPN Sources Sync and R2 Deployment
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # يعمل تلقائياً كل 6 ساعات
-  workflow_dispatch: # يسمح لك بتشغيله يدوياً بضغطة زر من هاتفك
+    - cron: '0 */6 * * *'  # Runs every 6 hours
+  workflow_dispatch:      # Allows manual trigger from GitHub UI
+
+permissions:
+  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 boto3 cloudscraper geoip2
 
-      - name: Run Downloader
+      - name: Run Enterprise Sync and Deploy to R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PUBLICVPNLIST_ACCESS_KEY: ${{ secrets.PUBLICVPNLIST_ACCESS_KEY }}
+          BACKEND_SECRET_KEY: ${{ secrets.BACKEND_SECRET_KEY }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
         run: |
-          # نشغل البرنامج ونخبره ألا يقوم بالرفع من داخل البايثون (سنتولى ذلك هنا)
-          python downloader.py --yes --max-pages 100
+          python sync_backend.py
 
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy web_dist --project-name=public-vpn-list
+      - name: Check if data actually changed
+        id: check_changes
+        run: |
+          # Compute local checksum of servers.json
+          LOCAL_CHECKSUM=$(sha256sum output/servers.json | awk '{print $1}')
+          echo "Local SHA256: $LOCAL_CHECKSUM"
+
+          # Fetch remote checksum from Cloudflare KV via Worker meta endpoint
+          REMOTE_CHECKSUM=$(curl -sf https://z-vpn.site/api/v1/meta \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('checksum',''))" 2>/dev/null || echo "")
+          echo "Remote SHA256: $REMOTE_CHECKSUM"
+
+          if [ "$LOCAL_CHECKSUM" = "$REMOTE_CHECKSUM" ]; then
+            echo "data_changed=false" >> "$GITHUB_OUTPUT"
+            echo "Data unchanged – skipping git commit and push."
+          else
+            echo "data_changed=true" >> "$GITHUB_OUTPUT"
+            echo "Data changed – will commit and push."
+          fi
+
+      - name: Commit and Push Updated Servers to Repository
+        if: steps.check_changes.outputs.data_changed == 'true'
+        continue-on-error: true
+        run: |
+          git config --global user.name "ZVPN Bot"
+          git config --global user.email "bot@z-vpn.site"
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-sync VPN servers & deploy R2 payload [skip ci]" && git pull --rebase origin rebrand/zvpn && git push origin rebrand/zvpn)
