@@ -648,9 +648,9 @@ nav {
 .modal-title { font-size: 1.5rem; font-weight: 800; margin-bottom: 6px; }
 .modal-sub { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
 
-.modal-methods { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 1.5rem; }
-@media (max-width: 600px) {
-  .modal-methods { grid-template-columns: 1fr; }
+.modal-methods { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1.5rem; }
+@media (max-width: 680px) {
+  .modal-methods { grid-template-columns: repeat(2, 1fr); }
 }
 .method-choice {
   background: var(--bg-elevated); border: 2px solid var(--border); border-radius: 14px;
@@ -2032,6 +2032,17 @@ footer { border-top: 1px solid var(--border); padding: 4rem 0 2rem; background: 
         <div class="method-title">USDT / Crypto</div>
         <div class="method-sub">NOWPayments (Instant)</div>
       </div>
+      <div class="method-choice" id="method-sha7nawy" onclick="selectPaymentMethod('sha7nawy')">
+        <div class="method-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#00E5FF" stroke-width="2" style="vertical-align:-3px"><rect x="5" y="2" width="14" height="20" rx="3"/><line x1="12" y1="18" x2="12.01" y2="18" stroke-width="3"/></svg></div>
+        <div class="method-title">فودافون كاش / المحافظ</div>
+        <div class="method-sub">Vodafone / Orange (EGP)</div>
+      </div>
+    </div>
+
+    <div class="form-group" id="group-wallet-phone" style="display: none;">
+      <label class="form-label">رقم محفظة كاش (اختياري للدفع الفوري 010 / 012 / 011):</label>
+      <input type="tel" id="checkout-wallet-phone" class="form-input" placeholder="010xxxxxxxx (أو اتركه فارغاً لفتح رابط الدفع الموحد)">
+      <small style="color: #00E5FF; display: block; margin-top: 5px; font-size: 0.82rem;">عند إدخال رقمك يظهر لك إشعار السحب المباشر (كود *9*1# لفودافون كاش)</small>
     </div>
 
     <div class="form-group">
@@ -4630,11 +4641,19 @@ function selectPaymentMethod(method) {
   document.getElementById('method-paypal')?.classList.toggle('active', method === 'paypal');
   const cryptoEl = document.getElementById('method-crypto') || document.getElementById('method-cryptomus');
   if (cryptoEl) cryptoEl.classList.toggle('active', method === 'crypto' || method === 'cryptomus' || method === 'nowpayments');
+  const sha7nawyEl = document.getElementById('method-sha7nawy');
+  if (sha7nawyEl) sha7nawyEl.classList.toggle('active', method === 'sha7nawy');
+
+  const phoneGroup = document.getElementById('group-wallet-phone');
+  if (phoneGroup) {
+    phoneGroup.style.display = (method === 'sha7nawy') ? 'block' : 'none';
+  }
 }
 
 async function processCheckout() {
   const email = document.getElementById('checkout-email').value.trim();
   const accountId = document.getElementById('checkout-account').value.trim();
+  const walletPhone = (document.getElementById('checkout-wallet-phone')?.value || '').trim();
   const submitBtn = document.getElementById('checkout-submit-btn');
 
   if (!email || !email.includes('@')) {
@@ -4648,6 +4667,7 @@ async function processCheckout() {
   try {
     let endpoint = '/api/v1/checkout/stripe';
     if (currentPaymentMethod === 'paypal') endpoint = '/api/v1/checkout/paypal';
+    else if (currentPaymentMethod === 'sha7nawy') endpoint = '/api/v1/checkout/sha7nawy';
     else if (currentPaymentMethod === 'crypto' || currentPaymentMethod === 'cryptomus' || currentPaymentMethod === 'nowpayments') endpoint = '/api/v1/checkout/nowpayments';
 
     const res = await fetch(endpoint, {
@@ -4658,12 +4678,34 @@ async function processCheckout() {
         plan_title: currentPlanTitle,
         amount: currentPlanPrice,
         email: email,
-        account_id: accountId
+        account_id: accountId,
+        number: walletPhone
       })
     });
 
     const data = await res.json();
-    if (data.url) {
+    if (data.mode === 'direct' && data.reference) {
+      submitBtn.textContent = (currentLang === 'ar' ? 'تأكيد السحب بعد الهاتف...' : 'Confirming on Phone...');
+      const userConfirm = confirm((data.instructions || 'يرجى تأكيد السحب على هاتفك') + '\n\nاضغط OK بعد إدخال الرقم السري لتأكيد المعاملة فوراً.');
+      if (userConfirm) {
+        submitBtn.textContent = (currentLang === 'ar' ? 'جارٍ تأكيد السحب وإصدار التفعيل...' : 'Issuing license...');
+        const confRes = await fetch('/api/v1/checkout/sha7nawy/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reference: data.reference, order_id: data.order_id })
+        });
+        const confData = await confRes.json();
+        if (confData.success && confData.license_key) {
+          window.location.href = '/?success=true&gateway=sha7nawy&order_id=' + data.order_id;
+          return;
+        } else {
+          alert(confData.message || (currentLang === 'ar' ? 'سيتم تأكيد المعاملة تلقائياً خلال دقائق بمجرد خصم المبلغ.' : 'Payment will be confirmed automatically once approved.'));
+        }
+      }
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Proceed to Secure Payment';
+      return;
+    } else if (data.url) {
       window.location.href = data.url;
     } else if (data.error) {
       alert('Checkout error: ' + data.error);
