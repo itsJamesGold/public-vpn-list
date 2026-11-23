@@ -89,7 +89,7 @@ async function getProcessedServers(env) {
 import { getWebsiteHtml } from './website.js';
 import { getServersPageHtml } from './servers_page.js';
 import { ARABIC_COUNTRIES } from './arabic_countries.js';
-import { md5, generateLicenseKey, toBase64, hmacSha512, sortObject } from './crypto_utils.js';
+import { md5, generateLicenseKey, toBase64, hmacSha512, hmacSha256, sortObject } from './crypto_utils.js';
 import { ZVPN_LOGO_SVG } from './logo.js';
 
 // In-Memory Fast Edge Cache Stores (Layer 1 Cache)
@@ -168,6 +168,36 @@ function getPayPalClientSecret(env) {
 
 function getPayPalApiBase(env) {
   return cleanVar(env && env.PAYPAL_API_BASE) || DEFAULT_PAYPAL_API_BASE;
+}
+
+// ── Sha7nawy Gate Egyptian Mobile Wallets (Vodafone Cash, Orange, Etisalat) ──
+const DEFAULT_SHA7NAWY_PUBLIC_KEY = "uKHdgCiSNR20uO1wgn7N0y2Nf5SrDX3ZroHwI9ovCLQjVe0c2MhACpUwgU0gnE3OOY4KdUZybs5s2vxzA3LEghEVhVHmAlA4ETTV";
+const DEFAULT_SHA7NAWY_SECRET_KEY = "l3kwJhO8fXTbhFoTTHOQkMqgRUhBuBeDBlKsWBOikoUqh7g5yP5bZIxTPROFr5A2ofgAJaW546clX6el4Lzf9efSbrDOiXL48y79";
+
+function getSha7nawyPublicKey(env) {
+  return cleanVar(env && env.SHA7NAWY_PUBLIC_KEY) || DEFAULT_SHA7NAWY_PUBLIC_KEY;
+}
+
+function getSha7nawySecretKey(env) {
+  return cleanVar(env && env.SHA7NAWY_SECRET_KEY) || DEFAULT_SHA7NAWY_SECRET_KEY;
+}
+
+const EGP_PLAN_PRICES = {
+  'pts_500': 50,
+  'pts_1200': 100,
+  'pts_3000': 200,
+  'pts_10000': 500,
+  'monthly': 250,
+  'premium_monthly': 250,
+  'premium_plus_monthly': 500,
+  'yearly': 2000,
+  'yearly_plus': 2500,
+  'lifetime': 4500
+};
+
+function getPlanAmountEgp(planId, usdAmount) {
+  if (EGP_PLAN_PRICES[planId]) return EGP_PLAN_PRICES[planId];
+  return Math.max(50, Math.round((usdAmount || 5) * 50));
 }
 
 // ── Exe.io URL Shortener API Integration ──
@@ -2050,6 +2080,192 @@ fi
         }
       }
 
+      // 13. Create Sha7nawy Egyptian Mobile Wallets Payment (/api/v1/checkout/sha7nawy)
+      if (pathname === '/api/v1/checkout/sha7nawy' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const rawPlanId = body.plan_id || body.plan || 'premium_plus_monthly';
+        const planMeta = PLAN_CATALOG[rawPlanId] || { amount: 9.99, title: 'Premium+ Monthly', tier: 'premium_plus' };
+        const plan_id = rawPlanId;
+        const plan_title = body.plan_title || planMeta.title;
+        const account_id = body.account_id || masterDeviceId || 'dev_guest';
+        const email = (body.email && body.email.includes('@')) ? body.email : `${account_id}@client.zvpn.net`;
+        const phone = (body.number || body.phone || '').trim();
+        const method = body.method || (phone.startsWith('010') ? 'vf_cash' : phone.startsWith('012') ? 'or_cash' : phone.startsWith('011') ? 'et_cash' : null);
+
+        const amountEgp = body.amount_egp ? parseFloat(body.amount_egp) : getPlanAmountEgp(plan_id, planMeta.amount);
+        const orderId = `zvpn_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const pubKey = getSha7nawyPublicKey(env);
+
+        try {
+          // If customer provides phone number and valid wallet method -> Direct Charge API
+          if (phone && phone.length === 11 && method) {
+            const createPayload = {
+              order_id: orderId,
+              number: phone,
+              amount: amountEgp,
+              method: method,
+              customer_name: body.customer_name || email.split('@')[0],
+              customer_email: email,
+              customer_phone: phone,
+              description: `ZVPN Subscription - ${plan_title}`,
+              webhook_url: `${url.origin}/api/v1/checkout/webhook/sha7nawy`,
+              metadata: {
+                plan_id: String(plan_id),
+                account_id: String(account_id),
+                email: String(email),
+                amount_egp: String(amountEgp)
+              }
+            };
+
+            const sRes = await fetch('https://gate.sha7nawy.com/api/v2/payment/create', {
+              method: 'POST',
+              headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': pubKey,
+                'X-App-Name': 'ZVPN-Edge'
+              },
+              body: JSON.stringify(createPayload)
+            });
+            const sData = await sRes.json();
+
+            if (sData.success && sData.data) {
+              await setStorage(env, `sha7nawy_order_${orderId}`, {
+                order_id: orderId,
+                reference: sData.data.reference,
+                plan_id, email, account_id,
+                amount_egp: amountEgp,
+                method, phone,
+                created_at: Date.now()
+              }, 86400);
+
+              let instruct = 'يرجى تأكيد السحب على هاتفك';
+              if (method === 'vf_cash') instruct = 'اطلب كود *9*1# على هاتفك وأدخل الرقم السري خلال 60 ثانية لتأكيد الدفع';
+              else if (method === 'or_cash') instruct = 'افتح تطبيق Orange Cash ووافق على طلب السحب المعلق';
+              else if (method === 'et_cash') instruct = 'اطلب كود *777*11# أو وافق عبر تطبيق e& Money';
+
+              return jsonResponse({
+                success: true,
+                mode: 'direct',
+                reference: sData.data.reference,
+                order_id: orderId,
+                instructions: instruct,
+                amount_egp: amountEgp,
+                method: method
+              }, 200, corsHeaders);
+            } else {
+              return jsonResponse({ error: sData.message || 'فشل إنشاء طلب الدفع عبر المحفظة', errors: sData.errors }, 400, corsHeaders);
+            }
+          }
+
+          // Hosted Payment Link (Customer selects wallet on hosted checkout)
+          const linkPayload = {
+            order_id: orderId,
+            amount: amountEgp,
+            methods: ['vf_cash', 'or_cash', 'et_cash'],
+            description: `ZVPN Subscription - ${plan_title}`,
+            success_url: `${url.origin}/?success=true&gateway=sha7nawy&order_id=${orderId}`,
+            fail_url: `${url.origin}/?canceled=true`,
+            webhook_url: `${url.origin}/api/v1/checkout/webhook/sha7nawy`,
+            customer_name: email.split('@')[0],
+            customer_email: email,
+            metadata: {
+              plan_id: String(plan_id),
+              account_id: String(account_id),
+              email: String(email),
+              amount_egp: String(amountEgp)
+            }
+          };
+
+          const sLinkRes = await fetch('https://gate.sha7nawy.com/api/v2/payment-link/create', {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'Authorization': pubKey,
+              'X-App-Name': 'ZVPN-Edge'
+            },
+            body: JSON.stringify(linkPayload)
+          });
+          const sLinkData = await sLinkRes.json();
+
+          if (sLinkData.success && sLinkData.data && sLinkData.data.payment_url) {
+            await setStorage(env, `sha7nawy_order_${orderId}`, {
+              order_id: orderId,
+              token: sLinkData.data.token,
+              plan_id, email, account_id,
+              amount_egp: amountEgp,
+              created_at: Date.now()
+            }, 86400);
+
+            return jsonResponse({
+              success: true,
+              mode: 'link',
+              url: sLinkData.data.payment_url,
+              token: sLinkData.data.token,
+              order_id: orderId,
+              amount_egp: amountEgp
+            }, 200, corsHeaders);
+          } else {
+            return jsonResponse({ error: sLinkData.message || 'فشل إنشاء رابط دفع المحافظ', errors: sLinkData.errors }, 400, corsHeaders);
+          }
+        } catch (err) {
+          return jsonResponse({ error: err.message }, 500, corsHeaders);
+        }
+      }
+
+      // 14. Confirm Sha7nawy Direct Payment (/api/v1/checkout/sha7nawy/confirm)
+      if (pathname === '/api/v1/checkout/sha7nawy/confirm' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const reference = body.reference;
+        const pubKey = getSha7nawyPublicKey(env);
+
+        if (!reference) {
+          return jsonResponse({ error: 'Missing reference code.' }, 400, corsHeaders);
+        }
+
+        try {
+          const confRes = await fetch('https://gate.sha7nawy.com/api/v2/payment/confirm', {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'Authorization': pubKey,
+              'X-App-Name': 'ZVPN-Edge'
+            },
+            body: JSON.stringify({ reference })
+          });
+          const confData = await confRes.json();
+
+          if (confData.success) {
+            const orderId = confData.data?.order_id || body.order_id;
+            if (orderId) {
+              const meta = await getStorage(env, `sha7nawy_order_${orderId}`, {});
+              const existingKey = await getStorage(env, `sha7nawy_order_key_${orderId}`, null);
+              if (!existingKey) {
+                const planId = meta.plan_id || 'yearly';
+                const email = meta.email || '';
+                const accountId = meta.account_id || '';
+                const key = generateLicenseKey();
+                const licData = provisionLicenseData(planId, email, key);
+                await setStorage(env, `license_${key}`, licData);
+                await setStorage(env, `sha7nawy_order_key_${orderId}`, key);
+                if (accountId) await creditUserAccount(env, accountId, licData);
+                return jsonResponse({ success: true, confirmed: true, license_key: key, ...licData }, 200, corsHeaders);
+              } else {
+                const lic = await getStorage(env, `license_${existingKey}`, null);
+                return jsonResponse({ success: true, confirmed: true, license_key: existingKey, ...lic }, 200, corsHeaders);
+              }
+            }
+            return jsonResponse({ success: true, confirmed: true, data: confData.data }, 200, corsHeaders);
+          } else {
+            return jsonResponse({ success: false, message: confData.message || 'لم يتم تأكيد السحب بعد', code: confData.code }, 200, corsHeaders);
+          }
+        } catch (err) {
+          return jsonResponse({ error: err.message }, 500, corsHeaders);
+        }
+      }
+
       // 13. Verify Payment Session & Mint License (/api/v1/checkout/verify-session)
       if (pathname === '/api/v1/checkout/verify-session' && request.method === 'GET') {
         const sessionId = url.searchParams.get('session_id');
@@ -2190,6 +2406,40 @@ fi
           }
         }
 
+        // Check Sha7nawy Egyptian Mobile Wallets
+        if (orderId && (url.searchParams.get('gateway') === 'sha7nawy' || orderId.startsWith('zvpn_'))) {
+          const existingKey = await getStorage(env, `sha7nawy_order_key_${orderId}`, null);
+          if (existingKey) {
+            const lic = await getStorage(env, `license_${existingKey}`, null);
+            return jsonResponse({ paid: true, license_key: existingKey, ...lic }, 200, corsHeaders);
+          }
+
+          const secKey = getSha7nawySecretKey(env);
+          try {
+            const infoRes = await fetch(`https://gate.sha7nawy.com/api/v2/payment-link/info/${orderId}`, {
+              headers: { 'Authorization': secKey, 'Accept': 'application/json' }
+            });
+            const infoData = await infoRes.json();
+            if (infoData.success && (infoData.data?.status === 'paid' || infoData.data?.status === 'completed')) {
+              const meta = await getStorage(env, `sha7nawy_order_${orderId}`, {});
+              const planId = meta.plan_id || 'yearly';
+              const email = meta.email || infoData.data?.customer_email || '';
+              const accountId = meta.account_id || '';
+              const key = generateLicenseKey();
+
+              const licData = provisionLicenseData(planId, email, key);
+              await setStorage(env, `license_${key}`, licData);
+              await setStorage(env, `sha7nawy_order_key_${orderId}`, key);
+
+              if (accountId) {
+                await creditUserAccount(env, accountId, licData);
+              }
+
+              return jsonResponse({ paid: true, license_key: key, ...licData }, 200, corsHeaders);
+            }
+          } catch (_) {}
+        }
+
         return jsonResponse({ error: 'session_id, paypal_order_id, or order_id parameter required.' }, 400, corsHeaders);
       }
 
@@ -2268,6 +2518,53 @@ fi
           }
         }
         return jsonResponse({ success: true }, 200, corsHeaders);
+      }
+
+      // 16. Sha7nawy S2S Webhook (/api/v1/checkout/webhook/sha7nawy)
+      if (pathname === '/api/v1/checkout/webhook/sha7nawy' && request.method === 'POST') {
+        const rawBody = await request.text();
+        const incomingSig = request.headers.get('x-sha7nawy-signature-256') || '';
+        const secKey = getSha7nawySecretKey(env);
+
+        let data = {};
+        try {
+          data = JSON.parse(rawBody || '{}');
+        } catch (_) {}
+
+        // Verify HMAC-SHA256 signature if provided
+        if (incomingSig && secKey) {
+          try {
+            const expectedSig = await hmacSha256(secKey, rawBody);
+            if (incomingSig !== expectedSig) {
+              console.warn('Sha7nawy Webhook signature mismatch:', incomingSig, 'expected:', expectedSig);
+            }
+          } catch (_) {}
+        }
+
+        const event = data.event;
+        const tx = data.data || {};
+        const orderId = tx.order_id;
+        const status = (tx.status || '').toLowerCase();
+
+        if (orderId && (status === 'completed' || status === 'paid' || event === 'transaction.completed')) {
+          const existingKey = await getStorage(env, `sha7nawy_order_key_${orderId}`, null);
+          if (!existingKey) {
+            const meta = await getStorage(env, `sha7nawy_order_${orderId}`, {});
+            const planId = meta.plan_id || tx.metadata?.plan_id || 'yearly';
+            const email = meta.email || tx.customer_email || tx.client || '';
+            const accountId = meta.account_id || tx.metadata?.account_id || '';
+            const key = generateLicenseKey();
+
+            const licData = provisionLicenseData(planId, email, key);
+            await setStorage(env, `license_${key}`, licData);
+            await setStorage(env, `sha7nawy_order_key_${orderId}`, key);
+
+            if (accountId) {
+              await creditUserAccount(env, accountId, licData);
+            }
+          }
+        }
+        return jsonResponse({ success: true, message: 'Webhook processed' }, 200, corsHeaders);
       }
 
       // 16. Verify License Key Status (/api/v1/license/check)
