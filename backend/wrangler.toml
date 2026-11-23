@@ -25,3 +25,17 @@ ENVIRONMENT = "production"
 # ── Observability (free) ──────────────────────────────────────────────────────
 [observability]
 enabled = true
+
+# ── Backup Cloudflare Account (Failover / Mirror) ───────────────────────────
+[env.backup]
+name = "zvpn-backend"
+account_id = "c1d646feb93ce90e1086c4332fad68b3"
+workers_dev = true
+routes = []
+
+[[env.backup.kv_namespaces]]
+binding = "CORRECTIONS_KV"
+id = "23f27d68f6d64f8083a1c4434ff0eff0"
+
+[env.backup.vars]
+ENVIRONMENT = "production"
