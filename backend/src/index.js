@@ -2359,6 +2359,7 @@ function jsonResponse(data, status = 200, headers = {}) {
     status: status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
+      'X-ZVPN-Failover': 'https://zvpn-backend.itsbaask.workers.dev',
       ...headers
     }
   });
