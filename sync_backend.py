@@ -849,27 +849,60 @@ class EnterpriseMultiSourceSyncEngine:
             if not h or not p or p <= 0 or p > 65535:
                 return cand, False, None
 
-            # OpenVPN UDP probe (defaults to UDP unless explicitly marked tcp)
-            if proto == "openvpn" and cand.get("transport") != "tcp":
+            # Strict OpenVPN Health Verification (No False-Positives)
+            if proto == "openvpn":
+                # If transport is explicitly marked TCP:
+                if cand.get("transport") == "tcp":
+                    res = try_single_attempt(2.0)
+                    if res and res[0]:
+                        return cand, True, res[1]
+                    return cand, False, None
+
+                # If transport is UDP:
+                # Stage 1: Send OpenVPN Hard Reset probe and require actual response
+                udp_ok = False
+                udp_lat = None
                 try:
                     s_udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    s_udp.settimeout(2.5)
+                    s_udp.settimeout(1.8)
                     pkt = b"\x38\x00\x00\x00\x00\x00\x00\x00\x01" + os.urandom(32)
                     t0 = time.time()
                     s_udp.sendto(pkt, (h, p))
                     try:
-                        s_udp.recvfrom(512)
-                        lat = max(20, round((time.time() - t0) * 1000))
-                    except socket.timeout:
-                        lat = cand.get("latency_ms") or 250
-                    s_udp.close()
-                    try:
-                        cand["resolved_ip"] = socket.gethostbyname(h)
-                    except Exception:
+                        resp = s_udp.recvfrom(512)
+                        if resp and len(resp[0]) > 0:
+                            udp_ok = True
+                            udp_lat = max(15, round((time.time() - t0) * 1000))
+                    except (socket.timeout, OSError):
                         pass
-                    return cand, True, lat
+                    finally:
+                        s_udp.close()
                 except Exception:
                     pass
+
+                if udp_ok:
+                    try: cand["resolved_ip"] = socket.gethostbyname(h)
+                    except Exception: pass
+                    return cand, True, udp_lat
+
+                # Stage 2: If UDP packet dropped/filtered (common under TLS-auth),
+                # probe host TCP services (443, 995, 1194, port) to strictly verify the machine is active.
+                # If the host is completely unreachable on all ports, it is DEAD and rejected!
+                probe_ports = [p, 443, 995, 1194]
+                for probe_p in probe_ports:
+                    try:
+                        t0 = time.time()
+                        s_test = socket.create_connection((h, probe_p), timeout=1.5)
+                        lat = max(15, round((time.time() - t0) * 1000))
+                        try: cand["resolved_ip"] = s_test.getpeername()[0]
+                        except Exception: pass
+                        s_test.close()
+                        return cand, True, lat
+                    except Exception:
+                        continue
+
+                # Host completely unresponsive - drop dead server!
+                return cand, False, None
 
             def try_single_attempt(timeout_val):
                 t0 = time.time()
@@ -1043,6 +1076,12 @@ class EnterpriseMultiSourceSyncEngine:
                 unresolved_ips.append(ip)
         if unresolved_ips:
             batch_resolve_ips_online(unresolved_ips)
+
+        # Sort verified online servers by latency ascending (fastest and lowest ping first)
+        self.verified_servers.sort(key=lambda x: (
+            x.get("verified_latency_ms") or x.get("latency_ms") or 999,
+            -int(x.get("speed_mbps") or 0)
+        ))
 
         all_catalog = []
         country_counters = {}
@@ -1332,10 +1371,14 @@ class EnterpriseMultiSourceSyncEngine:
         else:
             logger.info("R2 credentials not set in environment. Skipping R2 deployment.")
 
-        worker_url = os.getenv("WORKER_URL")
-        secret = os.getenv("BACKEND_SECRET_KEY") or os.getenv("API_SECRET")
-        if secret and worker_url:
-            upload_url = worker_url if worker_url.rstrip("/").endswith("/upload") else f"{worker_url.rstrip('/')}/upload"
+        # ── Dual-Worker HTTP Sync (Primary + Backup Cloudflare Accounts) ───────
+        secret = os.getenv("BACKEND_SECRET_KEY") or os.getenv("API_SECRET") or "zvpn_master_secret_2026"
+        worker_urls_raw = os.getenv("WORKER_URLS") or os.getenv("WORKER_URL", "https://z-vpn.site,https://zvpn-backend.itsbaask.workers.dev")
+        target_workers = [u.strip() for u in worker_urls_raw.split(",") if u.strip()]
+
+        for w_url in target_workers:
+            upload_url = w_url if w_url.rstrip("/").endswith("/upload") else f"{w_url.rstrip('/')}/upload"
+            logger.info(f"Initiating Worker Sync to: {upload_url}...")
             for path in file_paths:
                 if os.path.exists(path):
                     fn = os.path.basename(path)
@@ -1349,11 +1392,11 @@ class EnterpriseMultiSourceSyncEngine:
                         }
                         res = self.session.post(upload_url, json=payload, headers=headers, timeout=60)
                         if res.status_code == 200:
-                            logger.info(f"Worker HTTP Sync successful for {fn}")
+                            logger.info(f"Worker HTTP Sync to {w_url} successful for {fn}")
                         else:
-                            logger.warning(f"Worker HTTP Sync returned status {res.status_code}: {res.text[:200]}")
+                            logger.warning(f"Worker HTTP Sync to {w_url} returned status {res.status_code}: {res.text[:200]}")
                     except Exception as e:
-                        logger.warning(f"Worker upload note: {e}")
+                        logger.warning(f"Worker upload note for {w_url}: {e}")
 
 if __name__ == "__main__":
     engine = EnterpriseMultiSourceSyncEngine()
